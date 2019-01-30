@@ -2,8 +2,6 @@ module Transformation (tseitin) where
 
 import qualified Data.Map as Map
 import Data.Unique
-import Data.Maybe (fromMaybe)
-import Data.List (intercalate)
 import Control.Applicative ((<$>))
 import Control.Monad
 

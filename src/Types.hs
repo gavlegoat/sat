@@ -1,5 +1,8 @@
 module Types where
 
+import Data.Unique
+import Data.Maybe (fromMaybe)
+import Data.List (intercalate)
 import qualified Data.Map as Map
 
 type VarMap = Map.Map Unique String
@@ -29,12 +32,12 @@ data Formula = Lit Literal
 
 showFormula :: VarMap -> Formula -> String
 showFormula m (Lit l) = showLit m l
-showFormula m (And a b) = "(" ++ showFormula m a ++ " /\\ " ++ showFormula m b ++ ")"
-showFormula m (Or a b) = "(" ++ showFormula m a ++ " \\/ " ++ showFormula m b ++ ")"
+showFormula m (And a b) = "(" ++ showFormula m a ++ " & " ++ showFormula m b ++ ")"
+showFormula m (Or a b) = "(" ++ showFormula m a ++ " | " ++ showFormula m b ++ ")"
 showFormula m (Not f) = "~" ++ showFormula m f
 showFormula m (Implies p c) = "(" ++ showFormula m p ++ " -> " ++ showFormula m c ++ ")"
 showFormula m (Iff a b) = "(" ++ showFormula m a ++ " <-> " ++ showFormula m b ++ ")"
 
 showClauses :: VarMap -> CNFFormula -> String
-showClauses m = intercalate " /\\ " . map (showClause m) where
-  showClause m x = "(" ++ intercalate " \\/ " (map (showLit m) x) ++ ")"
+showClauses m = intercalate " & " . map (showClause m) where
+  showClause m x = "(" ++ intercalate " | " (map (showLit m) x) ++ ")"

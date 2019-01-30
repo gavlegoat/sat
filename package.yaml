@@ -21,6 +21,8 @@ description:         Please see the README on GitHub at <https://github.com/gavl
 
 dependencies:
 - base >= 4.7 && < 5
+- parsec >= 3.0 && < 4
+- containers >= 0.6 && < 1
 
 library:
   source-dirs: src
