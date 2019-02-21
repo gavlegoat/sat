@@ -1,108 +1,70 @@
 module Transformation (tseitin) where
 
-import qualified Data.Map as Map
-import Data.Unique
-import Control.Applicative ((<$>))
-import Control.Monad
+import Control.Monad.State
 
 import Types
 
--- Helper function for binary operations in Tseitin's transformation
-mapSubs :: (Formula -> Formula -> Formula) -> Formula -> Formula
-        -> IO (Literal, [Formula])
-mapSubs op a b = do
-  (va, fsa) <- subformulas a
-  (vb, fsb) <- subformulas b
-  v' <- fmap LVar newUnique
-  case (va, vb) of
-    (LTrue, LTrue) -> return (v', [Iff (Lit v') (op a b)])
-    (LTrue, _    ) -> return (v', Iff (Lit v') (op a (Lit vb)) : fsb)
-    (_    , LTrue) -> return (v', Iff (Lit v') (op (Lit va) b) : fsa)
-    (_    , _    ) -> return (v', Iff (Lit v') (op (Lit va) (Lit vb)) : fsa ++ fsb)
-
--- Introduce a new variable for this subformula, recurse and return a list of
--- formulas created in the reursive calls
-subformulas :: Formula -> IO (Literal, [Formula])
-subformulas (Lit l) = return (LTrue, [Lit l])
-subformulas (And a b) = mapSubs And a b
-subformulas (Or a b) = mapSubs Or a b
-subformulas (Not f) = do
-  (v, fs) <- subformulas f
-  v' <- fmap LVar newUnique
-  if v == LTrue then return (v', [Iff (Lit v') (Not f)])
-                else return (v', Iff (Lit v') (Not (Lit v)) : fs)
-subformulas (Implies p c) = mapSubs Implies p c
-subformulas (Iff a b) = mapSubs Iff a b
-
--- Convert a formula to CNF, return a list of clauses where each clause is
--- a list of disjuncts
-toCNF :: Formula -> IO CNFFormula
-toCNF (Lit l) = return [[l]]
-toCNF (And a b) = liftM2 (++) (toCNF a) (toCNF b)
-toCNF (Or a b) = do
-  a' <- toCNF a
-  b' <- toCNF b
-  return [x ++ y | x <- a', y <- b']
-toCNF (Not (Lit l)) = return [[LNot l]]
+-- Convert a formula to conjunctive normal form.
+toCNF :: Formula -> CNFFormula
+toCNF (Lit l) = [[l]]
+toCNF (And a b) = toCNF a ++ toCNF b
+toCNF (Or a b) = [x ++ y | x <- toCNF a, y <- toCNF b]
+toCNF (Not (Lit (LNot l))) = [[l]]
+toCNF (Not (Lit l)) = [[LNot l]]
 toCNF (Not (And a b)) = toCNF (Or (Not a) (Not b))
 toCNF (Not (Or a b)) = toCNF (And (Not a) (Not b))
-toCNF (Not (Not f)) = toCNF f
-toCNF (Not (Implies p c)) = toCNF (And p (Not c))
-toCNF (Not (Iff a b)) = toCNF (Or (Not (Implies a b)) (Not (Implies b a)))
-toCNF (Implies p c) = toCNF (Or (Not p) c)
+toCNF (Not (Not a)) = toCNF a
+toCNF (Not (Implies a b)) = toCNF (And a (Not b))
+toCNF (Not (Iff a b)) = toCNF (Not (And (Implies a b) (Implies b a)))
+toCNF (Implies a b) = toCNF (Or (Not a) b)
 toCNF (Iff a b) = toCNF (And (Implies a b) (Implies b a))
 
--- Given a formula, return an equisatisfiable CNF formula
-tseitin :: Formula -> IO CNFFormula
-tseitin f = do
-  fs <- subformulas f
-  let fs' = Lit (fst fs) : snd fs
-  concat <$> traverse toCNF fs'
+-- Create a conjunction where each clause is a subformula of the original
+-- formula labeled with some fresh variable. The return value is the label
+-- for the subformula along with the formula representing that subformula.
+-- For example, if we start with ((a /\ b) \/ (c /\ d)) /\ e, then we should
+-- return the set of clauses:
+-- x0 <-> c /\ d
+-- x1 <-> a /\ b
+-- x2 <-> x1 \/ x0
+-- x3 <-> x2 /\ e
+-- Note that it is the responsibility of the caller to assert the top-level
+-- variable. In the previous example, the caller should add the clause x3 to
+-- the returned clause list. LTrue is used in the returned literal to indicate
+-- that the returned formula should be used directly. LTrue will only be
+-- returned if f is a literal.
+tseitinHelp :: Formula -> State Int (Literal, Formula)
+tseitinHelp f =
+  case f of
+    (Lit l) -> return (LTrue, Lit l)
+    (Not a) -> do
+      (l, f') <- tseitinHelp a
+      s <- getFreshVar
+      if l == LTrue then return (s, Iff (Lit s) (Not f'))
+                    else return (s, Iff (Lit s) (Not (Lit l)))
+    (And a b) -> binaryOpTseitin And a b
+    (Or a b) -> binaryOpTseitin Or a b
+    (Implies a b) -> binaryOpTseitin Implies a b
+    (Iff a b) -> binaryOpTseitin Iff a b
+  where
+    getFreshVar = do
+      n <- get
+      put (n + 1)
+      return $ LVar ("x!" ++ show n)
+    binaryOpTseitin op a b = do
+      (la, fa) <- tseitinHelp a
+      (lb, fb) <- tseitinHelp b
+      s <- getFreshVar
+      if la == LTrue
+         then if lb == LTrue
+                 then return (s, Iff (Lit s) (op fa fb))
+                 else return (s, Iff (Lit s) (op fa (Lit lb)))
+         else if lb == LTrue
+                 then return (s, Iff (Lit s) (op (Lit la) fb))
+                 else return (s, Iff (Lit s) (op (Lit la) (Lit lb)))
 
-clearTrueFalse :: Formula -> Formula
-clearTrueFalse (Lit l) = Lit l
-clearTrueFalse (And a b) =
-  let a' = clearTrueFalse a
-      b' = clearTrueFalse b
-   in case (a', b') of
-        (Lit LFalse, Lit LFalse) -> Lit LFalse
-        (Lit LTrue, b'') -> b''
-        (a'', Lit LTrue) -> a''
-        (a'', b'') -> And a'' b''
-clearTrueFalse (Or a b) =
-  let a' = clearTrueFalse a
-      b' = clearTrueFalse b
-   in case (a', b') of
-        (Lit LFalse, Lit LFalse) -> Lit LFalse
-        (Lit LTrue, _) -> Lit LTrue
-        (_, Lit LTrue) -> Lit LTrue
-        (a'', b'') -> Or a'' b''
-clearTrueFalse (Not f) =
-  let f' = clearTrueFalse f
-   in case f' of
-        Lit LTrue -> Lit LFalse
-        Lit LFalse -> Lit LTrue
-        _ -> Not f'
-clearTrueFalse (Implies a b) =
-  let a' = clearTrueFalse a
-      b' = clearTrueFalse b
-   in case (a', b') of
-        (Lit LFalse, _) -> Lit LTrue
-        (_, Lit LTrue) -> Lit LTrue
-        (Lit LTrue, Lit LFalse) -> Lit LFalse
-        (Lit LTrue, b'') -> b''
-        (a'', Lit LFalse) -> Not a''
-        (a'', b'') -> Implies a'' b''
-clearTrueFalse (Iff a b) =
-  let a' = clearTrueFalse a
-      b' = clearTrueFalse b
-   in case (a', b') of
-        (Lit LTrue, Lit LTrue) -> Lit LTrue
-        (Lit LFalse, Lit LFalse) -> Lit LTrue
-        (Lit LTrue, Lit LFalse) -> Lit LFalse
-        (Lit LFalse, Lit LTrue) -> Lit LFalse
-        (Lit LTrue, b'') -> b''
-        (Lit LFalse, b'') -> Not b''
-        (a'', Lit LTrue) -> a''
-        (a'', Lit LFalse) -> Not a''
-        (a'', b'') -> Iff a'' b''
+-- Given a formula, produce an equisatisfiable formula in conjunctive normal
+-- form.
+tseitin :: Formula -> CNFFormula
+tseitin f = let (l, f') = evalState (tseitinHelp f) 0
+             in [l] : toCNF f'

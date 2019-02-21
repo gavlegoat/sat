@@ -1,4 +1,9 @@
 module Main where
 
+import Parser
+
 main :: IO ()
-main = putStrLn "Nothing here yet"
+main = do
+  l <- getLine
+  print (parseFormula l)
+  main

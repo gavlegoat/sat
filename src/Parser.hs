@@ -1,7 +1,5 @@
 module Parser (parseFormula) where
 
-import qualified Data.Map as Map
-import Data.Unique
 import Text.Parsec
 import Text.Parsec.Language
 import Text.Parsec.Expr
@@ -13,10 +11,18 @@ import Types
 -- f ::= true | false | STRING | '~' f
 --     | f '&' f | f '|' f | f '->' f | f '<->' f
 
-languageDef = emptyDef { Token.identStart = letter
-                       , Token.identLetter = alphaNum
-                       , Token.reservedNames = ["true", "false"]
-                       , Token.reservedOpNames = ["~", "&", "|", "->", "<->"] }
+languageDef =
+  Token.LanguageDef { Token.commentStart = "/*"
+                    , Token.commentEnd = "*/"
+                    , Token.commentLine = "//"
+                    , Token.nestedComments = False
+                    , Token.identStart = letter
+                    , Token.identLetter = alphaNum
+                    , Token.opStart = oneOf "~&|-<"
+                    , Token.opLetter = oneOf "~&|-><"
+                    , Token.reservedNames = ["true", "false"]
+                    , Token.reservedOpNames = ["~", "&", "|", "->", "<->"]
+                    , Token.caseSensitive = False }
 
 lexer = Token.makeTokenParser languageDef
 
@@ -26,18 +32,10 @@ reservedOp = Token.reservedOp lexer
 parens     = Token.parens     lexer
 whiteSpace = Token.whiteSpace lexer
 
-identParser :: ParsecT String VarMap IO Formula
-identParser = do
-  i <- identifier
-  vm <- getState
-  case Map.lookup i vm of
-    Nothing -> do
-      u <- newUnique
-      putState (Map.insert u i vm)
-      return (Lit $ LVar u)
-    Just u -> return (Lit $ LVar u)
+identParser :: Parsec String () Formula
+identParser = fmap (Lit . LVar) identifier
 
-term :: ParsecT String VarMap IO Formula
+term :: Parsec String () Formula
 term =   parens formulaParser
      <|> (reserved "true" >> return (Lit LTrue))
      <|> (reserved "false" >> return (Lit LFalse))
@@ -50,12 +48,11 @@ operators = [ [Prefix (reservedOp "~"   >> return Not    )            ]
                Infix  (reservedOp "<->" >> return Iff    ) AssocLeft  ]
             ]
 
-formulaParser :: ParsecT String VarMap IO Formula
+formulaParser :: Parsec String () Formula
 formulaParser = buildExpressionParser operators term
 
-parseFormula :: String -> IO Formula
-parseFormula input = do
-  ret <- runParserT formulaParser Map.empty "input" input
-  case ret of
-    Left err -> error err
-    Right f -> return f
+parseFormula :: String -> Formula
+parseFormula input =
+  case parse formulaParser "input" input of
+    Left err -> error $ show err
+    Right f -> f
