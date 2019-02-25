@@ -37,7 +37,7 @@ identParser = fmap (Lit . LVar) identifier
 
 term :: Parsec String () Formula
 term =   parens formulaParser
-     <|> (reserved "true" >> return (Lit LTrue))
+     <|> (reserved "true"  >> return (Lit LTrue))
      <|> (reserved "false" >> return (Lit LFalse))
      <|> identParser
 
