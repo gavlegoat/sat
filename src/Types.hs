@@ -7,15 +7,16 @@ module Types ( Literal(..)
              , cnfHasNoClauses
              , cnfHasEmptyClause
              , Formula(..)
-             , showClauses
              , Interpretation(..)
              , interpFromMap
              , emptyInterp
              , addBinding
+             , restrictInterpretation
              , SATResult(..)
              ) where
 
 import Data.List (intercalate, notElem)
+import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
 data Literal = LVar String
@@ -33,16 +34,27 @@ instance Show Literal where
 -- A CNF formula is a conjunction of disjunctions of literals
 newtype CNFFormula = CNFFormula { cnfToList :: [[Literal]] }
 
+instance Show CNFFormula where
+  show = intercalate " & " . map showClause . cnfToList where
+    showClause x = "(" ++ intercalate " | " (map show x) ++ ")"
+
 cnfFromList :: [[Literal]] -> CNFFormula
 cnfFromList = CNFFormula
 
 -- Remove LTrue and LFalse from a CNF formula
 simplifyCNF :: CNFFormula -> CNFFormula
-simplifyCNF = cnfFromList . removeLTrue . removeLFalse . cnfToList where
-  -- If a literal is false we can remove that literal
-  removeLFalse = map (filter (/= LFalse))
-  -- If a literal is true we can remove the containing clause
-  removeLTrue = filter (notElem LTrue)
+simplifyCNF = cnfFromList . removeLTrue . removeLFalse . removeNot . cnfToList
+  where
+    -- Deal with double negations or negations of false and true
+    removeNot = map (map processLiteral)
+    processLiteral (LNot (LNot l)) = processLiteral l
+    processLiteral (LNot LTrue) = LFalse
+    processLiteral (LNot LFalse) = LTrue
+    processLiteral l = l
+    -- If a literal is false we can remove that literal
+    removeLFalse = map (filter (/= LFalse))
+    -- If a literal is true we can remove the containing clause
+    removeLTrue = filter (notElem LTrue)
 
 assignVar :: String -> Bool -> CNFFormula -> CNFFormula
 assignVar v b = simplifyCNF . cnfFromList . map processClause . cnfToList where
@@ -74,14 +86,14 @@ instance Show Formula where
   show (Implies p c) = "(" ++ show p ++ " -> "  ++ show c ++ ")"
   show (Iff a b)     = "(" ++ show a ++ " <-> " ++ show b ++ ")"
 
-showClauses :: CNFFormula -> String
-showClauses = intercalate " & " . map showClause . cnfToList where
-  showClause x = "(" ++ intercalate " | " (map show x) ++ ")"
-
 newtype Interpretation = Interpretation { interpToMap :: Map.Map String Bool }
 
 instance Show Interpretation where
-  show = show . interpToMap
+  show i = "[" ++ showBindings i ++ "]" where
+    showBindings =
+      intercalate ", " .
+        map (\(v, b) -> v ++ " -> " ++ show b) .
+          Map.assocs . interpToMap
 
 emptyInterp :: Interpretation
 emptyInterp = Interpretation Map.empty
@@ -91,6 +103,10 @@ interpFromMap = Interpretation
 
 addBinding :: String -> Bool -> Interpretation -> Interpretation
 addBinding s b = interpFromMap . Map.insert s b . interpToMap
+
+restrictInterpretation :: Set.Set String -> Interpretation -> Interpretation
+restrictInterpretation vs =
+  interpFromMap . flip Map.restrictKeys vs . interpToMap
 
 data SATResult = Unsat
                | Sat Interpretation

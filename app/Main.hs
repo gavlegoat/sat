@@ -3,6 +3,7 @@ module Main where
 import System.IO (hFlush, stdout)
 
 import Parser
+import Transformation
 import SAT
 
 main :: IO ()
@@ -13,5 +14,8 @@ main = do
   if l == "quit"
      then return ()
      else do
-       print $ checkSAT $ parseFormula l
+       let f = parseFormula l
+       print f
+       print $ tseitin f
+       print $ checkSAT f
        main
