@@ -4,7 +4,7 @@ import System.IO (hFlush, stdout)
 
 import Parser
 import Transformation
-import SAT
+import DPLL
 
 main :: IO ()
 main = do
