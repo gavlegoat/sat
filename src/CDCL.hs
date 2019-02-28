@@ -6,10 +6,12 @@ import qualified Data.Graph.Inductive as Graph
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad.State
-import Control.Monad (foldM, sequence)
+import Control.Monad (foldM, foldM_, sequence)
 
 import Types
 import Transformation
+
+{-# ANN module "HLint: ignore Reduce duplication" #-}
 
 -- A clauses consists of a set of literals
 type Clause = [Literal]
@@ -64,22 +66,104 @@ data CDCLState =
             , watchLits :: Map ClauseLabel (Maybe (Literal, Literal))
             }
 
--- Assign a variable to a value
-assign :: String -> Bool -> State CDCLState ()
+-- Assign a variable to a value. Return true if there is a conflict.
+assign :: String -> Bool -> State CDCLState Bool
 assign v b = do
   s <- get
   let ig = implGraph s
   let d = decisionLevel s
   let n = head $ Graph.newNodes 1 ig
-  put $ s {         implGraph = Graph.insNode (n, Assignment v b d) ig
-          ,         varToNode = Map.insert v n $ varToNode s
-          , currentAssignment = addBinding v b $ currentAssignment s
-          ,        unassigned = Set.delete v $ unassigned s }
+  case Map.lookup v . interpToMap $ currentAssignment s of
+    Just b' | b' /= b -> return True
+    _ -> do
+      put $ s {         implGraph = Graph.insNode (n, Assignment v b d) ig
+              ,         varToNode = Map.insert v n $ varToNode s
+              , currentAssignment = addBinding v b $ currentAssignment s
+              ,        unassigned = Set.delete v $ unassigned s }
+      return False
+
+-- Add an edge to the implication graph from the variable in the given
+-- literal to the given node, labeled with the given clause. Note that
+-- if the given literal is for the variable in the node we should avoid
+-- adding a self-edge
+addEdge :: String -> Graph.Node -> ClauseLabel -> Literal -> State CDCLState ()
+addEdge var n i l = do
+  let v = case l of
+            LVar u -> u
+            LNot (LVar u) -> u
+  if v == var then return () else do
+    s <- get
+    case Map.lookup v $ varToNode s of
+      Nothing -> error "An assigned node is not in the implication graph"
+      Just n' -> put $ s { implGraph = Graph.insEdge (n', n, i) $ implGraph s }
+
+-- Perform an assignment which is caused by some clause. This implies that the
+-- new node in the implication graph will need incoming edges.
+assignImpl :: ClauseLabel -> Clause -> String -> Bool -> State CDCLState Bool
+assignImpl i c v b = do
+  s <- get
+  let ig = implGraph s
+  let d = decisionLevel s
+  let n = head $ Graph.newNodes 1 ig
+  case Map.lookup v . interpToMap $ currentAssignment s of
+    Just b' | b' /= b -> return True
+    _ -> do
+      let ng = Graph.insNode (n, Assignment v b d) ig
+      mapM_ (addEdge v n i) c
+      return False
 
 data BCPResult = BCPConflict
                | BCPAssign String
                | BCPNothing
                deriving (Eq)
+
+-- This function is called whenever a watch literal for some clause is
+-- assigned. We need to check to see if this clause becomes a unit. If it
+-- does, we should assign the remaining literal and return it. If this
+-- assignment is inconsistent, then we should return BCPConflict. Otherwise,
+-- we should assign new watch literals and return BCPNothing.
+checkWatchLiterals :: ClauseLabel -> Clause -> State CDCLState BCPResult
+checkWatchLiterals i c = do
+  vars <- findUnassigned c
+  if Set.size vars == 1
+     then do
+       let v = Set.elemAt 0 vars
+       conf <- assignImpl i c v $ appearsPositive v c
+       if conf
+          then do
+            s <- get
+            let ig = implGraph s
+            let d = decisionLevel s
+            let n = head $ Graph.newNodes 1 ig
+            let ng = Graph.insNode (n, Conflict) ig
+            mapM_ (addEdge "" n i) c
+            return BCPConflict
+          else return $ BCPAssign v
+     else do
+       let v1 = findLiteral (Set.elemAt 0 vars) c
+       let v2 = findLiteral (Set.elemAt 1 vars) c
+       s <- get
+       put $ s { watchLits = Map.insert i (Just (v1, v2)) $ watchLits s }
+       return BCPNothing
+ where
+   findUnassigned = foldM processLiteral Set.empty
+   processLiteral :: Set String -> Literal -> State CDCLState (Set String)
+   processLiteral vs l = do
+     let v = case l of
+               LVar u -> u
+               LNot (LVar u) -> u
+     s <- get
+     case Map.lookup v . interpToMap $ currentAssignment s of
+       Nothing -> return $ Set.insert v vs
+       Just _ -> return vs
+   findLiteral v [] = error "Variable not found in a clause where it should be"
+   findLiteral v (l : ls) = case l of
+                              LVar u | u == v -> l
+                              LNot (LVar u) | u == v -> l
+                              _ -> findLiteral v ls
+   appearsPositive v c = case findLiteral v c of
+                           LVar _ -> True
+                           _ -> False
 
 -- Perform BCP and return true if there is a conflict. Takes as input a set of
 -- variables which need to be processed (i.e., newly assigned variables).
@@ -101,11 +185,27 @@ bcp f vs = do
    -- of variables which were set during BCP
    processVar Nothing   _ = return Nothing
    processVar (Just vs) v = do
-     vs' <- mapM processClause (Map.assocs f)
+     vs' <- mapM (processClause v) (Map.assocs f)
      if BCPConflict `elem` vs' then return Nothing
                                else return . Just $ extractAssigns vs'
-   processClause :: (ClauseLabel, Clause) -> State CDCLState BCPResult
-   processClause = undefined
+   processClause v (i, c) = do
+     s <- get
+     case Map.lookup i $ watchLits s of
+       Nothing -> error "Clause with no watch literals found"
+       Just Nothing -> return BCPNothing  -- This clause is already satisfied
+       Just (Just (LVar l1, LVar l2))
+         | v == l1 -> checkWatchLiterals i c
+         | v == l2 -> checkWatchLiterals i c
+       Just (Just (LVar l1, LNot (LVar l2)))
+         | v == l1 -> checkWatchLiterals i c
+         | v == l2 -> checkWatchLiterals i c
+       Just (Just (LNot (LVar l1), LVar l2))
+         | v == l1 -> checkWatchLiterals i c
+         | v == l2 -> checkWatchLiterals i c
+       Just (Just (LNot (LVar l1), LNot (LVar l2)))
+         | v == l1 -> checkWatchLiterals i c
+         | v == l2 -> checkWatchLiterals i c
+       _ -> return BCPNothing   -- v is neither of c's watch literals
    extractAssigns =
      Set.fromList . map (\(BCPAssign s) -> s) . filter (/= BCPNothing)
 
@@ -140,7 +240,7 @@ cdclLoop f = do
      else do
        let v = Set.findMin $ unassigned s
        let b = not (Set.member v $ triedTrue s)
-       assign v b
+       _ <- assign v b   -- There can't be a conflict because v is unassigned
        put $ s { triedTrue = Set.insert v (triedTrue s) }
        conflict <- bcp f $ Set.singleton v
        if conflict
