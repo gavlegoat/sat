@@ -6,27 +6,24 @@ import qualified Data.Graph.Inductive as Graph
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Control.Monad.State
-import Control.Monad (foldM)
+import Control.Monad (foldM, sequence)
 
 import Types
 import Transformation
 
--- A clauses consists of a set of literals along with up to two watch literals
-data Clause = Clause { disjuncts :: [Literal]
-                     , watchLit1 :: Maybe Literal
-                     , watchLit2 :: Maybe Literal
-                     }
+-- A clauses consists of a set of literals
+type Clause = [Literal]
 
 safeIndex :: Int -> [a] -> Maybe a
 safeIndex _ []       = Nothing
 safeIndex 0 (l : _ ) = Just l
 safeIndex n (_ : ls) = safeIndex (n - 1) ls
 
-constructClause :: [Literal] -> Clause
-constructClause ls = Clause ls (safeIndex 0 ls) (safeIndex 1 ls)
+-- A clause number
+type ClauseLabel = Int
 
 -- For CDCL it will be convenient to have names for the clauses
-type CDCLFormula = Map Int Clause
+type CDCLFormula = Map ClauseLabel Clause
 
 cnfToCDCL :: CNFFormula -> State Int CDCLFormula
 cnfToCDCL = cnfToCDCL' Map.empty . cnfToList . simplifyCNF where
@@ -36,16 +33,12 @@ cnfToCDCL = cnfToCDCL' Map.empty . cnfToList . simplifyCNF where
     put (n + 1)
     if null l
        then cnfToCDCL' m ls
-       else let c = constructClause l
-             in cnfToCDCL' (Map.insert n c m) ls
+       else cnfToCDCL' (Map.insert n l m) ls
 
 -- An assignment consists of a variable, a value it's assigned to, and a
 -- decision level
 data ImplNode = Assignment String Bool Int
               | Conflict
-
--- A clause number
-type ClauseLabel = Int
 
 -- An implication graph labels nodes with assignments and edges with the
 -- clauses from which those assignments can be derived
@@ -54,7 +47,7 @@ type ImplicationGraph = Graph.Gr ImplNode ClauseLabel
 data CDCLState =
   CDCLState { implGraph :: ImplicationGraph
             -- The graph has integers as nodes but we want to look up nodes
-            -- by the name of the assigned variable
+            -- by the name of the assigned variable. This is constant.
             , varToNode :: Map String Graph.Node
             , currentAssignment :: Interpretation
             , decisionLevel :: Int
@@ -66,6 +59,9 @@ data CDCLState =
             , triedTrue :: Set String
             -- The next available number for labelling a clause
             , nextClauseNumber :: Int
+            -- The watch literals for each clause. If the clause has no
+            -- unassigned variables then it is mapped to Nothing.
+            , watchLits :: Map ClauseLabel (Maybe (Literal, Literal))
             }
 
 -- Assign a variable to a value
@@ -79,6 +75,11 @@ assign v b = do
           ,         varToNode = Map.insert v n $ varToNode s
           , currentAssignment = addBinding v b $ currentAssignment s
           ,        unassigned = Set.delete v $ unassigned s }
+
+data BCPResult = BCPConflict
+               | BCPAssign String
+               | BCPNothing
+               deriving (Eq)
 
 -- Perform BCP and return true if there is a conflict. Takes as input a set of
 -- variables which need to be processed (i.e., newly assigned variables).
@@ -98,9 +99,15 @@ bcp f vs = do
  where
    -- processVar will return Nothing if there is a conflict and otherwise a set
    -- of variables which were set during BCP
-   processVar :: Maybe (Set String) -> String -> State CDCLState (Maybe (Set String))
    processVar Nothing   _ = return Nothing
-   processVar (Just vs) v = undefined
+   processVar (Just vs) v = do
+     vs' <- mapM processClause (Map.assocs f)
+     if BCPConflict `elem` vs' then return Nothing
+                               else return . Just $ extractAssigns vs'
+   processClause :: (ClauseLabel, Clause) -> State CDCLState BCPResult
+   processClause = undefined
+   extractAssigns =
+     Set.fromList . map (\(BCPAssign s) -> s) . filter (/= BCPNothing)
 
 -- Given the current assignment, analyze the conflict to derive a conflict
 -- clause and return it along with the decision level we need to backtrack to.
@@ -146,8 +153,15 @@ cdclLoop f = do
                  s <- get
                  put $ s {    decisionLevel = d'
                          , nextClauseNumber = nextClauseNumber s + 1 }
-                 cdclLoop $ Map.insert (nextClauseNumber s) (constructClause cc) f
+                 cdclLoop $ Map.insert (nextClauseNumber s) cc f
           else cdclLoop f
+
+-- This BCP takes care of singleton clauses in the initial formula. After this
+-- call, each clause in the formula should consist of at least two variables.
+-- Note that this is the only function which modifies the formula. Each other
+-- function only interacts with the fields of CDCLState.
+initialBCP :: CDCLFormula -> (CDCLFormula, Interpretation)
+initialBCP = undefined
 
 -- if bcp f leads to a conflict, return unsat, otherwise return cdclLoop
 cdcl :: CDCLFormula -> State ImplicationGraph SATResult
